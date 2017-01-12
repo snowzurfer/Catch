@@ -1,6 +1,6 @@
 /*
- *  Catch v1.6.0
- *  Generated: 2017-01-11 16:38:09.405017
+ *  Catch v1.6.0-develop.1
+ *  Generated: 2017-01-12 08:53:14.118580
  *  ----------------------------------------------------------
  *  This file has been merged from multiple headers. Please don't edit it directly
  *  Copyright (c) 2012 Two Blue Cubes Ltd. All rights reserved.
@@ -5851,13 +5851,10 @@ using TestCaseTracking::IndexTracker;
 namespace Catch {
 
     // Report the error condition then exit the process
-    inline void fatal( std::string const& message, int exitCode ) {
+    inline void reportFatal( std::string const& message, int exitCode ) {
         IContext& context = Catch::getCurrentContext();
         IResultCapture* resultCapture = context.getResultCapture();
         resultCapture->handleFatalErrorCondition( message );
-
-		if( Catch::alwaysTrue() ) // avoids "no return" warnings
-            exit( exitCode );
     }
 
 } // namespace Catch
@@ -5878,43 +5875,64 @@ namespace Catch {
 
 namespace Catch {
 
-    struct SignalDefs { int id; const char* name; };
+    struct SignalDefs {
+        int id;
+        const char* name;
+        void (*originalHandler)(int);
+    };
     extern SignalDefs signalDefs[];
     SignalDefs signalDefs[] = {
-            { SIGINT,  "SIGINT - Terminal interrupt signal" },
-            { SIGILL,  "SIGILL - Illegal instruction signal" },
-            { SIGFPE,  "SIGFPE - Floating point error signal" },
-            { SIGSEGV, "SIGSEGV - Segmentation violation signal" },
-            { SIGTERM, "SIGTERM - Termination request signal" },
-            { SIGABRT, "SIGABRT - Abort (abnormal termination) signal" }
-        };
+            { SIGINT,  "SIGINT - Terminal interrupt signal", CATCH_NULL },
+            { SIGILL,  "SIGILL - Illegal instruction signal", CATCH_NULL },
+            { SIGFPE,  "SIGFPE - Floating point error signal", CATCH_NULL },
+            { SIGSEGV, "SIGSEGV - Segmentation violation signal", CATCH_NULL },
+            { SIGTERM, "SIGTERM - Termination request signal", CATCH_NULL },
+            { SIGABRT, "SIGABRT - Abort (abnormal termination) signal", CATCH_NULL }
+    };
 
     struct FatalConditionHandler {
 
+        static FatalConditionHandler* m_handler;
+
         static void handleSignal( int sig ) {
-            for( std::size_t i = 0; i < sizeof(signalDefs)/sizeof(SignalDefs); ++i )
-                if( sig == signalDefs[i].id )
-                    fatal( signalDefs[i].name, -sig );
-            fatal( "<unknown signal>", -sig );
+            if( m_handler ) {
+                std::string name = "<unknown signal>";
+                for (std::size_t i = 0; i < sizeof(signalDefs) / sizeof(SignalDefs); ++i) {
+                    SignalDefs &def = signalDefs[i];
+                    if (sig == def.id) {
+                        name = def.name;
+                        signal( def.id, def.originalHandler );
+                        raise( sig );
+                        break;
+                    }
+                }
+                reportFatal(name, -sig);
+            }
         }
 
-        FatalConditionHandler() : m_isSet( true ) {
-            for( std::size_t i = 0; i < sizeof(signalDefs)/sizeof(SignalDefs); ++i )
-                signal( signalDefs[i].id, handleSignal );
+        FatalConditionHandler() {
+            m_handler = this;
+            struct sigaction prevAction;
+            for( std::size_t i = 0; i < sizeof(signalDefs)/sizeof(SignalDefs); ++i ) {
+                SignalDefs& def = signalDefs[i];
+                sigaction(def.id, CATCH_NULL, &prevAction );
+                def.originalHandler = prevAction.sa_handler;
+                signal(def.id, handleSignal);
+            }
         }
         ~FatalConditionHandler() {
             reset();
         }
         void reset() {
-            if( m_isSet ) {
+            if( m_handler ) {
                 for( std::size_t i = 0; i < sizeof(signalDefs)/sizeof(SignalDefs); ++i )
-                    signal( signalDefs[i].id, SIG_DFL );
-                m_isSet = false;
+                    signal( signalDefs[i].id, signalDefs[i].originalHandler );
+                m_handler = CATCH_NULL;
             }
         }
-
-        bool m_isSet;
     };
+
+    FatalConditionHandler* FatalConditionHandler::m_handler = CATCH_NULL;
 
 } // namespace Catch
 
@@ -7619,7 +7637,7 @@ namespace Catch {
         return os;
     }
 
-    Version libraryVersion( 1, 6, 0, "", 0 );
+    Version libraryVersion( 1, 6, 0, "develop", 1 );
 
 }
 
