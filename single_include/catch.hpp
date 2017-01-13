@@ -1,6 +1,6 @@
 /*
- *  Catch v1.6.0
- *  Generated: 2017-01-11 16:38:09.405017
+ *  Catch v1.6.0-develop.2
+ *  Generated: 2017-01-13 17:53:42.069129
  *  ----------------------------------------------------------
  *  This file has been merged from multiple headers. Please don't edit it directly
  *  Copyright (c) 2012 Two Blue Cubes Ltd. All rights reserved.
@@ -3447,6 +3447,8 @@ namespace Catch {
         virtual RunTests::InWhatOrder runOrder() const = 0;
         virtual unsigned int rngSeed() const = 0;
         virtual UseColour::YesOrNo useColour() const = 0;
+        virtual std::vector<std::string> const& getSectionsToRun() const = 0;
+
     };
 }
 
@@ -3573,6 +3575,7 @@ namespace Catch {
 
         std::vector<std::string> reporterNames;
         std::vector<std::string> testsOrTags;
+        std::vector<std::string> sectionsToRun;
     };
 
     class Config : public SharedImpl<IConfig> {
@@ -3613,7 +3616,8 @@ namespace Catch {
 
         bool shouldDebugBreak() const { return m_data.shouldDebugBreak; }
 
-        std::vector<std::string> getReporterNames() const { return m_data.reporterNames; }
+        std::vector<std::string> const& getReporterNames() const { return m_data.reporterNames; }
+        std::vector<std::string> const& getSectionsToRun() const CATCH_OVERRIDE { return m_data.sectionsToRun; }
 
         int abortAfter() const { return m_data.abortAfter; }
 
@@ -4703,6 +4707,7 @@ namespace Catch {
         config.abortAfter = x;
     }
     inline void addTestOrTags( ConfigData& config, std::string const& _testSpec ) { config.testsOrTags.push_back( _testSpec ); }
+    inline void addSectionToRun( ConfigData& config, std::string const& sectionName ) { config.sectionsToRun.push_back( sectionName ); }
     inline void addReporterName( ConfigData& config, std::string const& _reporterName ) { config.reporterNames.push_back( _reporterName ); }
 
     inline void addWarning( ConfigData& config, std::string const& _warning ) {
@@ -4855,6 +4860,10 @@ namespace Catch {
         cli["-#"]["--filenames-as-tags"]
             .describe( "adds a tag for the filename" )
             .bind( &ConfigData::filenamesAsTags );
+
+        cli["-c"]["--section"]
+                .describe( "specify section to run" )
+                .bind( &addSectionToRun, "section name" );
 
         // Less common commands which don't have a short form
         cli["--list-test-names-only"]
@@ -5539,11 +5548,21 @@ namespace Catch {
 namespace Catch {
 namespace TestCaseTracking {
 
+    struct NameAndLocation {
+        std::string name;
+        SourceLineInfo location;
+
+        NameAndLocation( std::string const& _name, SourceLineInfo const& _location )
+        :   name( _name ),
+            location( _location )
+        {}
+    };
+
     struct ITracker : SharedImpl<> {
         virtual ~ITracker();
 
         // static queries
-        virtual std::string name() const = 0;
+        virtual NameAndLocation const& nameAndLocation() const = 0;
 
         // dynamic queries
         virtual bool isComplete() const = 0; // Successfully completed or failed
@@ -5559,7 +5578,7 @@ namespace TestCaseTracking {
         virtual void markAsNeedingAnotherRun() = 0;
 
         virtual void addChild( Ptr<ITracker> const& child ) = 0;
-        virtual ITracker* findChild( std::string const& name ) = 0;
+        virtual ITracker* findChild( NameAndLocation const& nameAndLocation ) = 0;
         virtual void openChild() = 0;
 
         // Debug/ checking
@@ -5567,7 +5586,7 @@ namespace TestCaseTracking {
         virtual bool isIndexTracker() const = 0;
     };
 
-    class TrackerContext {
+    class  TrackerContext {
 
         enum RunState {
             NotStarted,
@@ -5629,30 +5648,32 @@ namespace TestCaseTracking {
             Failed
         };
         class TrackerHasName {
-            std::string m_name;
+            NameAndLocation m_nameAndLocation;
         public:
-            TrackerHasName( std::string const& name ) : m_name( name ) {}
+            TrackerHasName( NameAndLocation const& nameAndLocation ) : m_nameAndLocation( nameAndLocation ) {}
             bool operator ()( Ptr<ITracker> const& tracker ) {
-                return tracker->name() == m_name;
+                return
+                    tracker->nameAndLocation().name == m_nameAndLocation.name &&
+                    tracker->nameAndLocation().location == m_nameAndLocation.location;
             }
         };
         typedef std::vector<Ptr<ITracker> > Children;
-        std::string m_name;
+        NameAndLocation m_nameAndLocation;
         TrackerContext& m_ctx;
         ITracker* m_parent;
         Children m_children;
         CycleState m_runState;
     public:
-        TrackerBase( std::string const& name, TrackerContext& ctx, ITracker* parent )
-        :   m_name( name ),
+        TrackerBase( NameAndLocation const& nameAndLocation, TrackerContext& ctx, ITracker* parent )
+        :   m_nameAndLocation( nameAndLocation ),
             m_ctx( ctx ),
             m_parent( parent ),
             m_runState( NotStarted )
         {}
         virtual ~TrackerBase();
 
-        virtual std::string name() const CATCH_OVERRIDE {
-            return m_name;
+        virtual NameAndLocation const& nameAndLocation() const CATCH_OVERRIDE {
+            return m_nameAndLocation;
         }
         virtual bool isComplete() const CATCH_OVERRIDE {
             return m_runState == CompletedSuccessfully || m_runState == Failed;
@@ -5671,8 +5692,8 @@ namespace TestCaseTracking {
             m_children.push_back( child );
         }
 
-        virtual ITracker* findChild( std::string const& name ) CATCH_OVERRIDE {
-            Children::const_iterator it = std::find_if( m_children.begin(), m_children.end(), TrackerHasName( name ) );
+        virtual ITracker* findChild( NameAndLocation const& nameAndLocation ) CATCH_OVERRIDE {
+            Children::const_iterator it = std::find_if( m_children.begin(), m_children.end(), TrackerHasName( nameAndLocation ) );
             return( it != m_children.end() )
                 ? it->get()
                 : CATCH_NULL;
@@ -5750,32 +5771,56 @@ namespace TestCaseTracking {
     };
 
     class SectionTracker : public TrackerBase {
+        std::vector<std::string> m_filters;
     public:
-        SectionTracker( std::string const& name, TrackerContext& ctx, ITracker* parent )
-        :   TrackerBase( name, ctx, parent )
-        {}
+        SectionTracker( NameAndLocation const& nameAndLocation, TrackerContext& ctx, ITracker* parent )
+        :   TrackerBase( nameAndLocation, ctx, parent )
+        {
+            if( parent ) {
+                while( !parent->isSectionTracker() )
+                    parent = &parent->parent();
+
+                SectionTracker& parentSection = static_cast<SectionTracker&>( *parent );
+                addNextFilters( parentSection.m_filters );
+            }
+        }
         virtual ~SectionTracker();
 
         virtual bool isSectionTracker() const CATCH_OVERRIDE { return true; }
 
-        static SectionTracker& acquire( TrackerContext& ctx, std::string const& name ) {
+        static SectionTracker& acquire( TrackerContext& ctx, NameAndLocation const& nameAndLocation ) {
             SectionTracker* section = CATCH_NULL;
 
             ITracker& currentTracker = ctx.currentTracker();
-            if( ITracker* childTracker = currentTracker.findChild( name ) ) {
+            if( ITracker* childTracker = currentTracker.findChild( nameAndLocation ) ) {
                 assert( childTracker );
                 assert( childTracker->isSectionTracker() );
                 section = static_cast<SectionTracker*>( childTracker );
             }
             else {
-                section = new SectionTracker( name, ctx, &currentTracker );
+                section = new SectionTracker( nameAndLocation, ctx, &currentTracker );
                 currentTracker.addChild( section );
             }
-            if( !ctx.completedCycle() && !section->isComplete() ) {
-
-                section->open();
-            }
+            if( !ctx.completedCycle() )
+                section->tryOpen();
             return *section;
+        }
+
+        void tryOpen() {
+            if( !isComplete() && (m_filters.empty() || m_filters[0].empty() ||  m_filters[0] == m_nameAndLocation.name ) )
+                open();
+        }
+
+        void addInitialFilters( std::vector<std::string> const& filters ) {
+            if( !filters.empty() ) {
+                m_filters.push_back(""); // Root - should never be consulted
+                m_filters.push_back(""); // Test Case - not a section filter
+                std::copy( filters.begin(), filters.end(), std::back_inserter( m_filters ) );
+            }
+        }
+        void addNextFilters( std::vector<std::string> const& filters ) {
+            if( filters.size() > 1 )
+                std::copy( filters.begin()+1, filters.end(), std::back_inserter( m_filters ) );
         }
     };
 
@@ -5783,8 +5828,8 @@ namespace TestCaseTracking {
         int m_size;
         int m_index;
     public:
-        IndexTracker( std::string const& name, TrackerContext& ctx, ITracker* parent, int size )
-        :   TrackerBase( name, ctx, parent ),
+        IndexTracker( NameAndLocation const& nameAndLocation, TrackerContext& ctx, ITracker* parent, int size )
+        :   TrackerBase( nameAndLocation, ctx, parent ),
             m_size( size ),
             m_index( -1 )
         {}
@@ -5792,17 +5837,17 @@ namespace TestCaseTracking {
 
         virtual bool isIndexTracker() const CATCH_OVERRIDE { return true; }
 
-        static IndexTracker& acquire( TrackerContext& ctx, std::string const& name, int size ) {
+        static IndexTracker& acquire( TrackerContext& ctx, NameAndLocation const& nameAndLocation, int size ) {
             IndexTracker* tracker = CATCH_NULL;
 
             ITracker& currentTracker = ctx.currentTracker();
-            if( ITracker* childTracker = currentTracker.findChild( name ) ) {
+            if( ITracker* childTracker = currentTracker.findChild( nameAndLocation ) ) {
                 assert( childTracker );
                 assert( childTracker->isIndexTracker() );
                 tracker = static_cast<IndexTracker*>( childTracker );
             }
             else {
-                tracker = new IndexTracker( name, ctx, &currentTracker, size );
+                tracker = new IndexTracker( nameAndLocation, ctx, &currentTracker, size );
                 currentTracker.addChild( tracker );
             }
 
@@ -5830,7 +5875,7 @@ namespace TestCaseTracking {
     };
 
     inline ITracker& TrackerContext::startRun() {
-        m_rootTracker = new SectionTracker( "{root}", *this, CATCH_NULL );
+        m_rootTracker = new SectionTracker( NameAndLocation( "{root}", CATCH_INTERNAL_LINEINFO ), *this, CATCH_NULL );
         m_currentTracker = CATCH_NULL;
         m_runState = Executing;
         return *m_rootTracker;
@@ -5994,10 +6039,11 @@ namespace Catch {
             m_activeTestCase = &testCase;
 
             do {
-                m_trackerContext.startRun();
+                ITracker& rootTracker = m_trackerContext.startRun();
+                dynamic_cast<SectionTracker&>( rootTracker ).addInitialFilters( m_config->getSectionsToRun() );
                 do {
                     m_trackerContext.startCycle();
-                    m_testCaseTracker = &SectionTracker::acquire( m_trackerContext, testInfo.name );
+                    m_testCaseTracker = &SectionTracker::acquire( m_trackerContext, TestCaseTracking::NameAndLocation( testInfo.name, testInfo.lineInfo ) );
                     runCurrentTest( redirectedCout, redirectedCerr );
                 }
                 while( !m_testCaseTracker->isSuccessfullyCompleted() && !aborting() );
@@ -6051,10 +6097,7 @@ namespace Catch {
             Counts& assertions
         )
         {
-            std::ostringstream oss;
-            oss << sectionInfo.name << "@" << sectionInfo.lineInfo;
-
-            ITracker& sectionTracker = SectionTracker::acquire( m_trackerContext, oss.str() );
+            ITracker& sectionTracker = SectionTracker::acquire( m_trackerContext, TestCaseTracking::NameAndLocation( sectionInfo.name, sectionInfo.lineInfo ) );
             if( !sectionTracker.isOpen() )
                 return false;
             m_activeSections.push_back( &sectionTracker );
@@ -7619,7 +7662,7 @@ namespace Catch {
         return os;
     }
 
-    Version libraryVersion( 1, 6, 0, "", 0 );
+    Version libraryVersion( 1, 6, 0, "develop", 2 );
 
 }
 
